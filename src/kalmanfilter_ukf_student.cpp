@@ -11,8 +11,8 @@
 
 // -------------------------------------------------- //
 // YOU CAN USE AND MODIFY THESE CONSTANTS HERE
-constexpr double ACCEL_STD = 0.05;
-constexpr double GYRO_STD = 0.01/180.0 * M_PI;
+constexpr double ACCEL_STD = 1.0;
+constexpr double GYRO_STD = 0.02/180.0 * M_PI;
 constexpr double INIT_VEL_STD = 2;
 constexpr double INIT_PSI_STD = 5.0/180.0 * M_PI;
 constexpr double GPS_POS_STD = 3.0;
@@ -38,6 +38,17 @@ std::vector<VectorXd> generateSigmaPoints(VectorXd state, MatrixXd cov)
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
+    int n = state.size();
+    double kappa = 3.0 - n;
+
+    MatrixXd sqrtCov = cov.llt().matrixL();
+    sigmaPoints.push_back(state);
+
+    for(int i = 0; i < n; ++i)
+    {
+        sigmaPoints.push_back(state + sqrt(n + kappa)*sqrtCov.col(i));
+        sigmaPoints.push_back(state - sqrt(n + kappa)*sqrtCov.col(i));
+    }
 
     // ----------------------------------------------------------------------- //
 
@@ -50,6 +61,17 @@ std::vector<double> generateSigmaWeights(unsigned int numStates)
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
+    double kappa = 3.0 - numStates;
+    
+    double w0 = kappa/(numStates + kappa);
+    double w1 = 1/(2*(numStates + kappa));
+
+    weights.push_back(w0);
+
+    for(int i = 0; i < 2*numStates; ++i)
+    {
+        weights.push_back(w1);
+    }
 
     // ----------------------------------------------------------------------- //
 
@@ -62,6 +84,19 @@ VectorXd lidarMeasurementModel(VectorXd aug_state, double beaconX, double beacon
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
+    double px = aug_state[0];
+    double py = aug_state[1];
+    double psi = aug_state[2];
+    double v_r = aug_state[4];
+    double v_theta = aug_state[5];
+
+    double delta_x = beaconX - px;
+    double delta_y = beaconY - py;
+
+    double r = sqrt(delta_x*delta_x + delta_y*delta_y) + v_r;
+    double theta = atan2(delta_y,delta_x) - psi + v_theta;
+
+    z_hat << r, theta;
 
     // ----------------------------------------------------------------------- //
 
@@ -74,6 +109,37 @@ VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt)
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
+    // double px = aug_state(0);
+    // double py = aug_state(1);
+    // double psi = aug_state(2);
+    // double vel = aug_state(3);
+    // double w_psi = aug_state(4);
+    // double w_accl = aug_state(5);
+
+    // double x_new = px + dt*(vel*cos(psi));
+    // double y_new = py + dt*(vel*sin(psi));
+    // double psi_new = psi + dt*(psi_dot + w_psi);
+    // double vel_new = vel + dt*w_accl;
+
+    // new_state << x_new, y_new, psi_new, vel_new;
+
+    double px = aug_state(0);
+    double py = aug_state(1);
+    double psi = aug_state(2);
+    double vel = aug_state(3);
+    double w_psi = aug_state(4);
+    double w_accl = aug_state(5);
+
+    VectorXd state = VectorXd::Zero(4);
+    state << px, py, psi, vel;
+
+    VectorXd delta = VectorXd::Zero(4);
+    delta(0) = vel*cos(psi);
+    delta(1) = vel*sin(psi);
+    delta(2) = psi_dot + w_psi;
+    delta(3) = w_accl;
+
+    new_state = state + dt*delta;
 
     // ----------------------------------------------------------------------- //
 
@@ -102,7 +168,67 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         BeaconData map_beacon = map.getBeaconWithId(meas.id); // Match Beacon with built in Data Association Id
         if (meas.id != -1 && map_beacon.id != -1) // Check that we have a valid beacon match
         {
-           
+            // Generate Measurement Model Vector
+            VectorXd z = VectorXd::Zero(2);
+            z << meas.range, meas.theta;
+
+            // Generate Measurement Model Noise Covariance
+            MatrixXd R = Matrix2d::Zero();
+            R(0,0) = LIDAR_RANGE_STD*LIDAR_RANGE_STD;
+            R(1,1) = LIDAR_THETA_STD*LIDAR_THETA_STD;
+
+            // Augment the State Vector with Noise States
+            int n_x = state.size();
+            int n_z = 2;
+            int n_aug = n_x + n_z;
+
+            VectorXd aug_state = VectorXd::Zero(n_aug);
+            aug_state.head(n_x) = state;
+
+            MatrixXd aug_cov = MatrixXd::Zero(n_aug,n_aug);
+            aug_cov.topLeftCorner(n_x,n_x) = cov;
+            aug_cov.bottomRightCorner(n_z,n_z) = R;
+
+            // Generate Augmented Sigma Points
+            std::vector<VectorXd> sigma_points = generateSigmaPoints(aug_state, aug_cov);
+            std::vector<double> sigma_weights = generateSigmaWeights(n_aug);
+
+            // Measurement Model Augmented Sigma Points
+            std::vector<VectorXd> z_sig;
+            for (const auto& sigma_point : sigma_points)
+            {
+                z_sig.push_back(lidarMeasurementModel(sigma_point, map_beacon.x, map_beacon.y));
+            }
+
+            // Calculate Measurement Mean
+            VectorXd z_mean = VectorXd::Zero(n_z);
+            for(unsigned int i = 0; i < z_sig.size(); ++i)
+            {
+                z_mean += sigma_weights[i] * z_sig[i];
+            }
+
+            // Calculate Innovation Covariance
+            MatrixXd Py = MatrixXd::Zero(n_z,n_z);
+            for(unsigned int i = 0; i < z_sig.size(); ++i)
+            {
+                VectorXd diff = normaliseLidarMeasurement(z_sig[i] - z_mean);
+                Py += sigma_weights[i] * diff * diff.transpose();
+            }
+
+            // Calculate Cross Covariance
+            MatrixXd Pxy = MatrixXd::Zero(n_x, n_z);
+            for(unsigned int i = 0; i < 2*n_x + 1; ++i)
+            {
+                VectorXd x_diff = normaliseState(sigma_points[i].head(n_x) - state);
+                VectorXd z_diff = normaliseLidarMeasurement(z_sig[i] - z_mean);
+                Pxy += sigma_weights[i] * x_diff * z_diff.transpose();
+            }
+
+            MatrixXd K = Pxy*Py.inverse();
+            VectorXd y = normaliseLidarMeasurement(z - z_mean);
+            state = state + K*y;
+            cov = cov - K * Py * K.transpose(); 
+
 
         }
         // ----------------------------------------------------------------------- //
@@ -128,7 +254,48 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         // HINT: Do NOT normalise during sigma point calculation!
         // ----------------------------------------------------------------------- //
         // ENTER YOUR CODE HERE
+        
+        // Generate Q Matrix
+        MatrixXd Q = Matrix2d::Zero();
+        Q(0,0) = GYRO_STD*GYRO_STD;
+        Q(1,1) = ACCEL_STD*ACCEL_STD;
 
+        // Augment the State Vector with Noise States
+        int n_x = state.size();
+        int n_w = 2;
+        int n_aug = n_x + n_w;
+        VectorXd x_aug = VectorXd::Zero(n_aug);
+        MatrixXd P_aug = MatrixXd::Zero(n_aug, n_aug);
+        x_aug.head(n_x) = state;
+        P_aug.topLeftCorner(n_x,n_x) = cov;
+        P_aug.bottomRightCorner(n_w,n_w) = Q;
+
+        // Generate Augmented Sigma Points
+        std::vector<VectorXd> sigma_points = generateSigmaPoints(x_aug, P_aug);
+        std::vector<double> sigma_weights = generateSigmaWeights(n_aug);
+
+        // Predict Augmented Sigma Points
+        std::vector<VectorXd> sigma_points_predict;
+        for (const auto& sigma_point : sigma_points)
+        {
+            sigma_points_predict.push_back(vehicleProcessModel(sigma_point, gyro.psi_dot, dt));
+        }
+
+        // Calculate Mean
+        state = VectorXd::Zero(n_x);
+        for(unsigned int i = 0; i < sigma_points_predict.size(); ++i)
+        {
+            state += sigma_weights[i] * sigma_points_predict[i];
+        }
+        state = normaliseState(state);
+
+        // Calculate Covariance
+        cov = MatrixXd::Zero(n_x,n_x);
+        for(unsigned int i = 0; i < sigma_points_predict.size(); ++i)
+        {
+            VectorXd diff = normaliseState(sigma_points_predict[i] - state);
+            cov += sigma_weights[i] * diff * diff.transpose();
+        }
 
         // ----------------------------------------------------------------------- //
 

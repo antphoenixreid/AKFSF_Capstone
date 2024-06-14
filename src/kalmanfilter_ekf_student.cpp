@@ -47,6 +47,37 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         if (meas.id != -1 && map_beacon.id != -1)
         {           
             // The map matched beacon positions can be accessed using: map_beacon.x AND map_beacon.y
+
+            // Measurement Vector
+            VectorXd z = Vector2d::Zero();
+            z << meas.range, meas.theta;
+
+            // Implement Lidar Measurement Model
+            VectorXd z_hat = Vector2d::Zero();
+            double delta_x = map_beacon.x - state[0];
+            double delta_y = map_beacon.y - state[1];
+            double zhat_range = sqrt(delta_x*delta_x + delta_y*delta_y);
+            double zhat_theta = wrapAngle(atan2(delta_y,delta_x) - state[2]);
+            z_hat << zhat_range, zhat_theta;
+
+            // Implement the Innovation Calculations
+            VectorXd y = z - z_hat;
+            y(1) = wrapAngle(y(1)); 
+
+            MatrixXd H = MatrixXd(2,4);
+            H << -delta_x/zhat_range,-delta_y/zhat_range,0,0,delta_y/zhat_range/zhat_range,-delta_x/zhat_range/zhat_range,-1,0;
+
+            MatrixXd R = Matrix2d::Zero();
+            R(0,0) = LIDAR_RANGE_STD*LIDAR_RANGE_STD;
+            R(1,1) = LIDAR_THETA_STD*LIDAR_THETA_STD;
+
+            MatrixXd S = H*cov*H.transpose() + R;
+
+            // EKF Update Step Equations
+            MatrixXd K = cov*H.transpose()*S.inverse();
+
+            state = state + K*y;
+            cov = (Matrix4d::Identity() - K*H)*cov;
         }
 
         // ----------------------------------------------------------------------- //
@@ -72,6 +103,31 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         // values within correct range, otherwise strange angle effects might be seen.
         // ----------------------------------------------------------------------- //
         // ENTER YOUR CODE HERE
+
+        // Update State
+        double p_x = state(0);
+        double p_y = state(1);
+        double psi = state(2);
+        double vel = state(3);
+
+        double d_px = dt*(vel*cos(psi));
+        double d_py = dt*(vel*sin(psi));
+        double d_psi = dt*gyro.psi_dot;
+
+        state << p_x + d_px, p_y + d_py, wrapAngle(psi + d_psi), vel;
+
+        // Update Covariance
+        MatrixXd F = MatrixXd::Identity(4,4);
+        F(0,2) = -dt*vel*sin(psi);
+        F(0,3) = dt*cos(psi);
+        F(1,2) = dt*vel*cos(psi);
+        F(1,3) = dt*sin(psi);
+
+        MatrixXd Q = Matrix4d::Zero();
+        Q(2,2) = (dt*dt)*(GYRO_STD*GYRO_STD);
+        Q(3,3) = (dt*dt)*(ACCEL_STD*ACCEL_STD);
+
+        cov = F*cov*F.transpose() + Q;
 
         // ----------------------------------------------------------------------- //
 
