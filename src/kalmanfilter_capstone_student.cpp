@@ -103,9 +103,9 @@ VectorXd lidarMeasurementModel(VectorXd aug_state, double beaconX, double beacon
     return z_hat;
 }
 
-VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt)
+VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt, double w_bias)
 {
-    VectorXd new_state = VectorXd::Zero(4);
+    VectorXd new_state = VectorXd::Zero(5);
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
@@ -130,13 +130,13 @@ VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt)
     double w_psi = aug_state(4);
     double w_accl = aug_state(5);
 
-    VectorXd state = VectorXd::Zero(4);
-    state << px, py, psi, vel;
+    VectorXd state = VectorXd::Zero(5);
+    state << px, py, psi, vel, w_bias;
 
-    VectorXd delta = VectorXd::Zero(4);
+    VectorXd delta = VectorXd::Zero(5);
     delta(0) = vel*cos(psi);
     delta(1) = vel*sin(psi);
-    delta(2) = psi_dot + w_psi;
+    delta(2) = psi_dot - w_bias + w_psi;
     delta(3) = w_accl;
 
     new_state = state + dt*delta;
@@ -165,7 +165,48 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         // ----------------------------------------------------------------------- //
         // ENTER YOUR CODE HERE
 
-        BeaconData map_beacon = map.getBeaconWithId(meas.id); // Match Beacon with built in Data Association Id
+        // BeaconData map_beacon = map.getBeaconWithId(meas.id); // Match Beacon with built in Data Association Id
+        // Heading Estimation
+        double bearing = meas.theta;
+        double psi_lidar = wrapAngle(bearing - M_PI); // Estimating heading based on bearings of detected landmark (LIDAR)
+
+        double px = state(0);
+        double py = state(1);
+        double psi_gps = state(2);
+
+        // Compare GPS-estimated heading to LIDAR-estimated heading
+        double err = 1e-5;
+        if (abs(psi_lidar - psi_gps) <= err) // If true, take the average and set as new heading variable in state
+        {
+            double psi = (psi_lidar + psi_gps)/2;
+            state(2) = psi;
+        }
+
+        // Data Association
+        std::vector<BeaconData> close_beacons = map.getBeaconsWithinRange(px, py, meas.range);
+        double diff = 9999.9;
+        BeaconData map_beacon;
+
+        for (const BeaconData& beacon : close_beacons) // Iterate through vector of close by landmarks 
+        {
+            double beacon_x = beacon.x;
+            double beacon_y = beacon.y;
+
+            double psi = state(2);
+
+            // Get estimated position of landmark
+            double alpha = wrapAngle(psi + meas.theta);
+            double px_l = px + meas.range*cos(alpha);
+            double py_l = py + meas.range*sin(alpha);
+
+            double diff_temp = sqrt(pow((px_l - px), 2), pow((py_l - py), 2));
+            if (diff_temp < diff) 
+            {
+                diff = diff_temp;
+                map_beacon = beacon;
+            }
+        }
+
         if (meas.id != -1 && map_beacon.id != -1) // Check that we have a valid beacon match
         {
             // Generate Measurement Model Vector
@@ -345,6 +386,8 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
 
         state(0) = meas.x;
         state(1) = meas.y;
+        state(2) = atan2(meas.y/meas.x); // GPS estimated bearing
+
         cov(0,0) = GPS_POS_STD*GPS_POS_STD;
         cov(1,1) = GPS_POS_STD*GPS_POS_STD;
         cov(2,2) = INIT_PSI_STD*INIT_PSI_STD;
