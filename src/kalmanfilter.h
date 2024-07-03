@@ -20,12 +20,34 @@ class KalmanFilterBase
 {
     public:
 
-        KalmanFilterBase():m_initialised(false){}
+        KalmanFilterBase():m_initialised(false),
+                           m_init_position_valid(false),
+                           m_init_heading_valid(false),
+                           m_init_velocity_valid(false),
+                           m_init_bias_valid(false)
+        {}
         virtual ~KalmanFilterBase(){}
-        void reset(){m_initialised = false;}
+        void reset()
+        {
+            m_initialised = false;
+            m_init_position_valid = false;
+            m_init_heading_valid = false;
+            m_init_velocity_valid = false;
+            m_init_bias_valid = false;
+        }
         bool isInitialised() const {return m_initialised;}
 
     protected:
+        double m_init_position_x;
+        double m_init_position_y;
+        double m_init_heading;
+        double m_init_velocity;
+        double m_init_bias;
+
+        bool m_init_position_valid;
+        bool m_init_heading_valid;
+        bool m_init_velocity_valid;
+        bool m_init_bias_valid;
     
         VectorXd getState() const {return m_state;}
         MatrixXd getCovariance()const {return m_covariance;}

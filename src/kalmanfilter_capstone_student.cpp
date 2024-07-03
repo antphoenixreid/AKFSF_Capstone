@@ -165,48 +165,7 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         // ----------------------------------------------------------------------- //
         // ENTER YOUR CODE HERE
 
-        // BeaconData map_beacon = map.getBeaconWithId(meas.id); // Match Beacon with built in Data Association Id
-        // Heading Estimation
-        double bearing = meas.theta;
-        double psi_lidar = wrapAngle(bearing - M_PI); // Estimating heading based on bearings of detected landmark (LIDAR)
-
-        double px = state(0);
-        double py = state(1);
-        double psi_gps = state(2);
-
-        // Compare GPS-estimated heading to LIDAR-estimated heading
-        double err = 1e-5;
-        if (abs(psi_lidar - psi_gps) <= err) // If true, take the average and set as new heading variable in state
-        {
-            double psi = (psi_lidar + psi_gps)/2;
-            state(2) = psi;
-        }
-
-        // Data Association
-        std::vector<BeaconData> close_beacons = map.getBeaconsWithinRange(px, py, meas.range);
-        double diff = 9999.9;
-        BeaconData map_beacon;
-
-        for (const BeaconData& beacon : close_beacons) // Iterate through vector of close by landmarks 
-        {
-            double beacon_x = beacon.x;
-            double beacon_y = beacon.y;
-
-            double psi = state(2);
-
-            // Get estimated position of landmark
-            double alpha = wrapAngle(psi + meas.theta);
-            double px_l = px + meas.range*cos(alpha);
-            double py_l = py + meas.range*sin(alpha);
-
-            double diff_temp = sqrt(pow((px_l - px), 2), pow((py_l - py), 2));
-            if (diff_temp < diff) 
-            {
-                diff = diff_temp;
-                map_beacon = beacon;
-            }
-        }
-
+        BeaconData map_beacon = map.getBeaconWithId(meas.id); // Match Beacon with built in Data Association Id
         if (meas.id != -1 && map_beacon.id != -1) // Check that we have a valid beacon match
         {
             // Generate Measurement Model Vector
@@ -277,6 +236,22 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         setState(state);
         setCovariance(cov);
     }
+    else
+    {
+        // Data Association (LIDAR)
+        BeaconData map_beacon = map.getBeaconWithId(meas.id); // temp; TODO: Data Association without built-in method
+
+        if (meas.id != -1 && map_beacon.id != -1)
+        {
+            if (m_init_position_valid)
+            {
+                double delta_x = map_beacon.x - m_init_position_x;
+                double delta_y = map_beacon.y - m_init_position_y;
+
+                m_init_heading_valid = true;
+            }
+        }
+    }
 }
 
 void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
@@ -343,6 +318,12 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         setState(state);
         setCovariance(cov);
     } 
+    else
+    {
+        // Assume Driving Straight and/or Stationary
+        m_init_bias = gyro.psi_dot;
+        m_init_bias_valid = true;
+    }
 }
 
 void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
@@ -381,20 +362,53 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
         // ----------------------------------------------------------------------- //
         // YOU ARE FREE TO MODIFY THE FOLLOWING CODE HERE
 
-        VectorXd state = Vector4d::Zero();
-        MatrixXd cov = Matrix4d::Zero();
+        // Set initial position (first measurement)
+        if(!m_init_position_valid)
+        {
+            m_init_position_x = meas.x;
+            m_init_position_y = meas.y;
+            m_init_position_valid = true;
+        }
 
-        state(0) = meas.x;
-        state(1) = meas.y;
-        state(2) = atan2(meas.y/meas.x); // GPS estimated bearing
+        // Velocity Assuption/Initiation
+        m_init_velocity = 5;
+        m_init_velocity_valid = true;
 
-        cov(0,0) = GPS_POS_STD*GPS_POS_STD;
-        cov(1,1) = GPS_POS_STD*GPS_POS_STD;
-        cov(2,2) = INIT_PSI_STD*INIT_PSI_STD;
-        cov(3,3) = INIT_VEL_STD*INIT_VEL_STD;
+        // Estimating Heading from GPS measurement
+        if(m_init_position_valid && !m_init_heading_valid)
+        {
+            double delta_x = meas.x - m_init_position_x;
+            double delta_y = meas.y - m_init_position_y;
 
-        setState(state);
-        setCovariance(cov);
+            // Check if moved enough
+            if ((delta_x*delta_x + delta_y*delta_y) > 3*GPS_POS_STD)
+            {
+                // Estimate heading from delta position
+                m_init_heading = wrapAngle(atan2(delta_y, delta_x));
+                m_init_heading_valid = true;
+            }
+        }
+
+        if (m_init_position_valid && m_init_heading_valid && m_init_velocity_valid && m_init_bias_valid)
+        {
+            VectorXd state = VectorXd::Zero(5);
+            MatrixXd cov = MatrixXd::Zero(5,5);
+
+            state(0) = m_init_position_x;
+            state(1) = m_init_position_y;
+            state(2) = m_init_heading;
+            state(3) = m_init_velocity;
+            state(4) = m_init_bias;
+
+            cov(0,0) = GPS_POS_STD*GPS_POS_STD;
+            cov(1,1) = GPS_POS_STD*GPS_POS_STD;
+            cov(2,2) = LIDAR_THETA_STD*LIDAR_THETA_STD;
+            cov(3,3) = INIT_VEL_STD*INIT_VEL_STD;
+            cov(4,4) = GYRO_STD*GYRO_STD;
+
+            setState(state);
+            setCovariance(cov);
+        }
 
         // ----------------------------------------------------------------------- //
     }             
