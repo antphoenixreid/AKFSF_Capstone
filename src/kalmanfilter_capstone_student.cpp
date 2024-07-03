@@ -87,8 +87,8 @@ VectorXd lidarMeasurementModel(VectorXd aug_state, double beaconX, double beacon
     double px = aug_state[0];
     double py = aug_state[1];
     double psi = aug_state[2];
-    double v_r = aug_state[4];
-    double v_theta = aug_state[5];
+    double v_r = aug_state[5];
+    double v_theta = aug_state[6];
 
     double delta_x = beaconX - px;
     double delta_y = beaconY - py;
@@ -103,9 +103,9 @@ VectorXd lidarMeasurementModel(VectorXd aug_state, double beaconX, double beacon
     return z_hat;
 }
 
-VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt, double w_bias)
+VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt)
 {
-    VectorXd new_state = VectorXd::Zero(5);
+    VectorXd new_state = VectorXd::Zero(7);
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
@@ -127,16 +127,17 @@ VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt, doub
     double py = aug_state(1);
     double psi = aug_state(2);
     double vel = aug_state(3);
-    double w_psi = aug_state(4);
-    double w_accl = aug_state(5);
+    double bias = aug_state(4);
+    double w_psi = aug_state(5);
+    double w_accl = aug_state(6);
 
     VectorXd state = VectorXd::Zero(5);
-    state << px, py, psi, vel, w_bias;
+    state << px, py, psi, vel, bias;
 
     VectorXd delta = VectorXd::Zero(5);
     delta(0) = vel*cos(psi);
     delta(1) = vel*sin(psi);
-    delta(2) = psi_dot - w_bias + w_psi;
+    delta(2) = psi_dot - bias + w_psi;
     delta(3) = w_accl;
 
     new_state = state + dt*delta;
@@ -248,7 +249,13 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
                 double delta_x = map_beacon.x - m_init_position_x;
                 double delta_y = map_beacon.y - m_init_position_y;
 
-                m_init_heading_valid = true;
+                // Check if moved enough
+                if ((delta_x*delta_x + delta_y*delta_y) > 3*GPS_POS_STD)
+                {
+                    // Estimate heading from delta position
+                    m_init_heading = wrapAngle(atan2(delta_y, delta_x) - meas.theta);
+                    m_init_heading_valid = true;
+                }
             }
         }
     }
@@ -336,11 +343,12 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
         MatrixXd cov = getCovariance();
 
         VectorXd z = Vector2d::Zero();
-        MatrixXd H = MatrixXd(2,4);
+        MatrixXd H = MatrixXd(2,5);
         MatrixXd R = Matrix2d::Zero();
 
         z << meas.x,meas.y;
-        H << 1,0,0,0,0,1,0,0;
+        H << 1,0,0,0,0,
+             0,1,0,0,0;
         R(0,0) = GPS_POS_STD*GPS_POS_STD;
         R(1,1) = GPS_POS_STD*GPS_POS_STD;
 
@@ -349,8 +357,13 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
         MatrixXd S = H * cov * H.transpose() + R;
         MatrixXd K = cov*H.transpose()*S.inverse();
 
-        state = state + K*y;
-        cov = (MatrixXd::Identity(4,4) - K*H) * cov;
+        // GPS Check
+        VectorXd NIS = y.transpose()*S.inverse()*y;
+        if (NIS(0) < 5.99)
+        {
+            state = state + K*y;
+            cov = (MatrixXd::Identity(5,5) - K*H) * cov;
+        }    
 
         setState(state);
         setCovariance(cov);

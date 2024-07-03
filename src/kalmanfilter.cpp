@@ -87,8 +87,8 @@ VectorXd lidarMeasurementModel(VectorXd aug_state, double beaconX, double beacon
     double px = aug_state[0];
     double py = aug_state[1];
     double psi = aug_state[2];
-    double v_r = aug_state[4];
-    double v_theta = aug_state[5];
+    double v_r = aug_state[5];
+    double v_theta = aug_state[6];
 
     double delta_x = beaconX - px;
     double delta_y = beaconY - py;
@@ -105,7 +105,7 @@ VectorXd lidarMeasurementModel(VectorXd aug_state, double beaconX, double beacon
 
 VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt)
 {
-    VectorXd new_state = VectorXd::Zero(4);
+    VectorXd new_state = VectorXd::Zero(7);
 
     // ----------------------------------------------------------------------- //
     // ENTER YOUR CODE HERE
@@ -127,16 +127,17 @@ VectorXd vehicleProcessModel(VectorXd aug_state, double psi_dot, double dt)
     double py = aug_state(1);
     double psi = aug_state(2);
     double vel = aug_state(3);
-    double w_psi = aug_state(4);
-    double w_accl = aug_state(5);
+    double bias = aug_state(4);
+    double w_psi = aug_state(5);
+    double w_accl = aug_state(6);
 
-    VectorXd state = VectorXd::Zero(4);
-    state << px, py, psi, vel;
+    VectorXd state = VectorXd::Zero(5);
+    state << px, py, psi, vel, bias;
 
-    VectorXd delta = VectorXd::Zero(4);
+    VectorXd delta = VectorXd::Zero(5);
     delta(0) = vel*cos(psi);
     delta(1) = vel*sin(psi);
-    delta(2) = psi_dot + w_psi;
+    delta(2) = psi_dot - bias + w_psi;
     delta(3) = w_accl;
 
     new_state = state + dt*delta;
@@ -236,6 +237,28 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         setState(state);
         setCovariance(cov);
     }
+    else
+    {
+        // Data Association (LIDAR)
+        BeaconData map_beacon = map.getBeaconWithId(meas.id); // temp; TODO: Data Association without built-in method
+
+        if (meas.id != -1 && map_beacon.id != -1)
+        {
+            if (m_init_position_valid)
+            {
+                double delta_x = map_beacon.x - m_init_position_x;
+                double delta_y = map_beacon.y - m_init_position_y;
+
+                // Check if moved enough
+                if ((delta_x*delta_x + delta_y*delta_y) > 3*GPS_POS_STD)
+                {
+                    // Estimate heading from delta position
+                    m_init_heading = wrapAngle(atan2(delta_y, delta_x) - meas.theta);
+                    m_init_heading_valid = true;
+                }
+            }
+        }
+    }
 }
 
 void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
@@ -302,6 +325,12 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         setState(state);
         setCovariance(cov);
     } 
+    else
+    {
+        // Assume Driving Straight and/or Stationary
+        m_init_bias = gyro.psi_dot;
+        m_init_bias_valid = true;
+    }
 }
 
 void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
@@ -314,11 +343,12 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
         MatrixXd cov = getCovariance();
 
         VectorXd z = Vector2d::Zero();
-        MatrixXd H = MatrixXd(2,4);
+        MatrixXd H = MatrixXd(2,5);
         MatrixXd R = Matrix2d::Zero();
 
         z << meas.x,meas.y;
-        H << 1,0,0,0,0,1,0,0;
+        H << 1,0,0,0,0,
+             0,1,0,0,0;
         R(0,0) = GPS_POS_STD*GPS_POS_STD;
         R(1,1) = GPS_POS_STD*GPS_POS_STD;
 
@@ -327,8 +357,13 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
         MatrixXd S = H * cov * H.transpose() + R;
         MatrixXd K = cov*H.transpose()*S.inverse();
 
-        state = state + K*y;
-        cov = (MatrixXd::Identity(4,4) - K*H) * cov;
+        // GPS Check
+        VectorXd NIS = y.transpose()*S.inverse()*y;
+        if (NIS(0) < 5.99)
+        {
+            state = state + K*y;
+            cov = (MatrixXd::Identity(5,5) - K*H) * cov;
+        }    
 
         setState(state);
         setCovariance(cov);
@@ -340,18 +375,53 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
         // ----------------------------------------------------------------------- //
         // YOU ARE FREE TO MODIFY THE FOLLOWING CODE HERE
 
-        VectorXd state = Vector4d::Zero();
-        MatrixXd cov = Matrix4d::Zero();
+        // Set initial position (first measurement)
+        if(!m_init_position_valid)
+        {
+            m_init_position_x = meas.x;
+            m_init_position_y = meas.y;
+            m_init_position_valid = true;
+        }
 
-        state(0) = meas.x;
-        state(1) = meas.y;
-        cov(0,0) = GPS_POS_STD*GPS_POS_STD;
-        cov(1,1) = GPS_POS_STD*GPS_POS_STD;
-        cov(2,2) = INIT_PSI_STD*INIT_PSI_STD;
-        cov(3,3) = INIT_VEL_STD*INIT_VEL_STD;
+        // Velocity Assuption/Initiation
+        m_init_velocity = 5;
+        m_init_velocity_valid = true;
 
-        setState(state);
-        setCovariance(cov);
+        // Estimating Heading from GPS measurement
+        if(m_init_position_valid && !m_init_heading_valid)
+        {
+            double delta_x = meas.x - m_init_position_x;
+            double delta_y = meas.y - m_init_position_y;
+
+            // Check if moved enough
+            if ((delta_x*delta_x + delta_y*delta_y) > 3*GPS_POS_STD)
+            {
+                // Estimate heading from delta position
+                m_init_heading = wrapAngle(atan2(delta_y, delta_x));
+                m_init_heading_valid = true;
+            }
+        }
+
+        if (m_init_position_valid && m_init_heading_valid && m_init_velocity_valid && m_init_bias_valid)
+        {
+            VectorXd state = VectorXd::Zero(5);
+            MatrixXd cov = MatrixXd::Zero(5,5);
+
+            state(0) = m_init_position_x;
+            state(1) = m_init_position_y;
+            state(2) = m_init_heading;
+            state(3) = m_init_velocity;
+            state(4) = m_init_bias;
+
+            cov(0,0) = GPS_POS_STD*GPS_POS_STD;
+            cov(1,1) = GPS_POS_STD*GPS_POS_STD;
+            cov(2,2) = LIDAR_THETA_STD*LIDAR_THETA_STD;
+            cov(3,3) = INIT_VEL_STD*INIT_VEL_STD;
+            cov(4,4) = GYRO_STD*GYRO_STD;
+
+            setState(state);
+            setCovariance(cov);
+        }
 
         // ----------------------------------------------------------------------- //
     }             
